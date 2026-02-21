@@ -1,0 +1,11 @@
+gradio==5.*
+langchain==0.3.*
+langchain-community==0.3.*
+langchain-huggingface==0.1.*
+langchain-groq==1.1.*
+sentence-transformers==3.*
+faiss-cpu==1.8.*
+pypdf==5.*
+beautifulsoup4==4.*
+lxml==5.*
+python-dotenv==1.*
