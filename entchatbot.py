@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lightweight RAG Web App (Irish Law) — Gradio + LangChain + Groq + FAISS
+Lightweight RAG Web App (ENT) — Gradio + LangChain + Groq + FAISS
 
 Free hosting-friendly:
 - UI: Gradio (works great on Hugging Face Spaces)
@@ -76,7 +76,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
-logger = logging.getLogger("irish-law-rag-web")
+logger = logging.getLogger("ent-rag-web")
 
 
 # ------------------------------
@@ -162,7 +162,7 @@ def setup_rag_chain(vector_store: FAISS) -> RetrievalQA:
     )
 
     prompt_template = (
-        "You are a legal assistant specializing in Irish law.\n"
+        "You are a legal assistant specializing in ENT study and treatment.\n"
         "Answer the user's question using ONLY the context provided.\n"
         "If the answer is not in the context, say you don't have enough information.\n\n"
         "Context:\n{context}\n\n"
@@ -249,7 +249,7 @@ def answer_question(message: str, history: List[Tuple[str, str]]):
 def build_ui():
     title = "Irish Law RAG Chatbot"
     description = (
-        "Ask questions about the Irish legal documents you placed in the **docs/** folder.\n\n"
+        "Ask questions about the ENT documents you placed in the **docs/** folder.\n\n"
         "**Tip:** Ask specific questions (e.g., “What does Article 40 cover?”)."
     )
 
@@ -264,7 +264,7 @@ def build_ui():
             fn=answer_question,
             chatbot=gr.Chatbot(height=420),
             textbox=gr.Textbox(
-                placeholder="Type your question about Irish law…", scale=7),
+                placeholder="Type your question about ENT …", scale=7),
             examples=[
                 "What does Article 40 cover?",
                 "Summarise the main points relevant to personal rights.",
