@@ -2,17 +2,11 @@
 """
 Lightweight RAG Web App (ENT) — Gradio + LangChain + Groq + FAISS
 
-Free hosting-friendly:
-- UI: Gradio (works great on Hugging Face Spaces)
-- LLM: Groq cloud via ChatGroq (set GROQ_API_KEY)
-- Embeddings: sentence-transformers via HuggingFaceEmbeddings (no Ollama needed)
-- Vector DB: FAISS (in-memory; rebuilt at startup from docs/)
-
-Quick start (local):
-  pip install -r requirements.txt
-  export GROQ_API_KEY="your_groq_key"
-  python app.py
-  # open the printed Gradio URL
+Change in this version:
+- The UI launches immediately.
+- FAISS indexing + RAG chain setup happens in a background thread.
+- While building, the chat responds with a “still loading” message.
+- A status banner auto-refreshes to show build progress / errors.
 
 Deploy (Hugging Face Spaces):
 - Put app.py + requirements.txt + your docs/ folder in the Space repo
@@ -21,7 +15,10 @@ Deploy (Hugging Face Spaces):
 
 import os
 import logging
-from typing import List, Tuple
+import threading
+import time
+import traceback
+from typing import List, Tuple, Optional, Dict, Any
 
 # Optional: load .env if present
 try:
@@ -31,7 +28,6 @@ except Exception:
     pass
 
 from bs4 import BeautifulSoup
-
 import gradio as gr
 
 # LangChain
@@ -40,7 +36,6 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
-
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 
@@ -69,6 +64,10 @@ TOP_K = int(os.environ.get("TOP_K", "3"))
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "200"))
 
+# Status refresh interval (seconds)
+STATUS_REFRESH_EVERY = float(os.environ.get("STATUS_REFRESH_EVERY", "2.0"))
+
+
 # ------------------------------
 # Logging
 # ------------------------------
@@ -77,6 +76,32 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 logger = logging.getLogger("ent-rag-web")
+
+
+# ------------------------------
+# Global App State (thread-safe)
+# ------------------------------
+QA_CHAIN: Optional[RetrievalQA] = None
+STATE_LOCK = threading.Lock()
+
+APP_STATE: Dict[str, Any] = {
+    "state": "starting",  # starting | building | ready | error
+    "message": "Starting…",
+    "docs_loaded": 0,
+    "chunks_built": 0,
+    "last_error": "",
+    "started_at": time.time(),
+}
+
+
+def set_state(**kwargs):
+    with STATE_LOCK:
+        APP_STATE.update(kwargs)
+
+
+def get_state() -> Dict[str, Any]:
+    with STATE_LOCK:
+        return dict(APP_STATE)
 
 
 # ------------------------------
@@ -112,8 +137,10 @@ def load_documents(directory: str = DOCS_DIR) -> List[Document]:
                         text = soup.get_text(separator=" ", strip=True)
                         if text:
                             documents.append(
-                                Document(page_content=text,
-                                         metadata={"source": path})
+                                Document(
+                                    page_content=text,
+                                    metadata={"source": path}
+                                )
                             )
             except Exception as e:
                 logger.error("Error loading %s: %s", path, e)
@@ -169,44 +196,79 @@ def setup_rag_chain(vector_store: FAISS) -> RetrievalQA:
         "Question: {question}\n\n"
         "Answer (concise, accurate):"
     )
-    prompt = PromptTemplate(template=prompt_template,
-                            input_variables=["context", "question"])
+    prompt = PromptTemplate(
+        template=prompt_template,
+        input_variables=["context", "question"]
+    )
 
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
         chain_type="stuff",
         retriever=vector_store.as_retriever(search_kwargs={"k": TOP_K}),
         chain_type_kwargs={"prompt": prompt},
-        return_source_documents=True,  # we will show sources in the UI
+        return_source_documents=True,
     )
     logger.info("RAG chain ready (Groq model=%s).", GROQ_MODEL)
     return qa_chain
 
 
 # ------------------------------
-# App state (build once at startup)
+# Background initialization
 # ------------------------------
-QA_CHAIN: RetrievalQA = None
-
-
-def init_app():
+def init_app_background():
     global QA_CHAIN
-    logger.info("Initializing app... loading docs from %s", DOCS_DIR)
-    docs = load_documents(DOCS_DIR)
-    if not docs:
-        raise RuntimeError(
-            f"No documents found in '{DOCS_DIR}'. Add PDFs/HTML files under docs/ and restart."
-        )
+    try:
+        set_state(state="building",
+                  message=f"Loading documents from '{DOCS_DIR}'…")
+        logger.info(
+            "Initializing app (background)… loading docs from %s", DOCS_DIR)
 
-    chunks = split_documents(docs)
-    vector_store = build_vector_store(chunks)
-    QA_CHAIN = setup_rag_chain(vector_store)
+        docs = load_documents(DOCS_DIR)
+        set_state(docs_loaded=len(docs))
+
+        if not docs:
+            raise RuntimeError(
+                f"No documents found in '{DOCS_DIR}'. Add PDFs/HTML files under docs/ and restart."
+            )
+
+        set_state(message="Splitting documents into chunks…")
+        chunks = split_documents(docs)
+        set_state(chunks_built=len(chunks))
+
+        set_state(message="Building FAISS index (in-memory)…")
+        vector_store = build_vector_store(chunks)
+
+        set_state(message="Setting up Groq LLM + RetrievalQA chain…")
+        chain = setup_rag_chain(vector_store)
+
+        with STATE_LOCK:
+            QA_CHAIN = chain
+            APP_STATE["state"] = "ready"
+            APP_STATE["message"] = "Ready ✅ Ask your question."
+            APP_STATE["last_error"] = ""
+
+        logger.info("Background init finished: READY.")
+
+    except Exception as e:
+        err = f"{e}\n\n{traceback.format_exc()}"
+        logger.exception("Background init failed:")
+        set_state(state="error", message="Failed to initialize ❌", last_error=err)
 
 
+def start_background_init_once():
+    st = get_state()
+    if st["state"] in ("building", "ready"):
+        return
+    t = threading.Thread(target=init_app_background, daemon=True)
+    t.start()
+
+
+# ------------------------------
+# UI helpers
+# ------------------------------
 def format_sources(source_docs: List[Document]) -> str:
     if not source_docs:
         return "No sources returned."
-    # Deduplicate by source
     seen = set()
     sources = []
     for d in source_docs:
@@ -217,13 +279,41 @@ def format_sources(source_docs: List[Document]) -> str:
     return "\n".join(f"- {s}" for s in sources)
 
 
+def status_markdown() -> str:
+    st = get_state()
+    elapsed = int(time.time() - st["started_at"])
+    header = f"**Status:** `{st['state']}`  |  **Elapsed:** {elapsed}s  \n"
+    details = (
+        f"**Message:** {st['message']}  \n"
+        f"**Docs loaded:** {st.get('docs_loaded', 0)}  \n"
+        f"**Chunks built:** {st.get('chunks_built', 0)}  \n"
+    )
+    if st["state"] == "error" and st.get("last_error"):
+        details += "\n<details><summary><b>Error details</b></summary>\n\n```text\n"
+        details += st["last_error"][:8000]
+        details += "\n```\n</details>\n"
+    return header + details
+
+
 def answer_question(message: str, history: List[Tuple[str, str]]):
-    """
-    Gradio ChatInterface callback.
-    """
     message = (message or "").strip()
     if not message:
         return "Please enter a question."
+
+    st = get_state()
+    if st["state"] != "ready" or QA_CHAIN is None:
+        if st["state"] == "error":
+            return (
+                "The app failed to initialize, so I can't answer yet.\n\n"
+                "Check the **Status** panel above for error details."
+            )
+        return (
+            f"Index is still building…\n\n"
+            f"- {st['message']}\n"
+            f"- Docs loaded: {st.get('docs_loaded', 0)}\n"
+            f"- Chunks built: {st.get('chunks_built', 0)}\n\n"
+            "Try again in a moment."
+        )
 
     try:
         result = QA_CHAIN.invoke({"query": message})
@@ -247,10 +337,10 @@ def answer_question(message: str, history: List[Tuple[str, str]]):
 # Main (Gradio)
 # ------------------------------
 def build_ui():
-    title = "Irish Law RAG Chatbot"
+    title = "ENT RAG Chatbot"
     description = (
         "Ask questions about the ENT documents you placed in the **docs/** folder.\n\n"
-        "**Tip:** Ask specific questions (e.g., “What does Article 40 cover?”)."
+        "**Note:** The UI loads immediately; indexing happens in the background."
     )
 
     with gr.Blocks(title=title) as demo:
@@ -260,7 +350,16 @@ def build_ui():
             "**Retriever:** FAISS (in-memory)  \n"
             "**Embeddings:** " + HF_EMBEDDING_MODEL
         )
-        chat = gr.ChatInterface(
+
+        status = gr.Markdown(status_markdown())
+
+        # ✅ Gradio 5+ replacement for `every=`: use a Timer + tick event
+        timer = gr.Timer(value=STATUS_REFRESH_EVERY, active=True)
+        timer.tick(fn=status_markdown, inputs=[], outputs=status, queue=False)
+
+        gr.Markdown("---")
+
+        gr.ChatInterface(
             fn=answer_question,
             chatbot=gr.Chatbot(height=420),
             textbox=gr.Textbox(
@@ -271,12 +370,14 @@ def build_ui():
                 "What does the context say about due process?"
             ],
         )
+
     return demo
 
 
 if __name__ == "__main__":
-    init_app()
+    start_background_init_once()
     demo = build_ui()
-    # server_name=0.0.0.0 helps in containers/Spaces
-    demo.launch(server_name="0.0.0.0", server_port=int(
-        os.environ.get("PORT", "7860")))
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=int(os.environ.get("PORT", "7860"))
+    )
