@@ -12,7 +12,7 @@ Instead of relying only on a language model’s general knowledge, the applicati
 
 ## Demo
 
-Live demo: [Hugging Face Spaces](https://huggingface.co/spaces/jobalexander2801/ENTChatBot)
+Live demo: [Hugging Face Spaces](https://huggingface.co/spaces/jobalexander2801/ENTChatBot2)
 
 ## Features
 
@@ -144,6 +144,8 @@ Typical deployment steps:
 ## FAISS Index Handling
 
 Because vector indexes can become large, the FAISS index can be stored separately and downloaded during app startup.
+
+The full 10 GB document corpus is **not uploaded to this GitHub repository**. Large source documents and related index assets are managed separately to keep the repository lightweight and practical for demo deployment.
 
 This approach helps keep the demo application lightweight while still supporting large-scale retrieval.
 
